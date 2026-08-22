@@ -1,213 +1,49 @@
-name: Release
+name: Test Build
 
 on:
+  # Allows you to manually trigger the workflow from the "Actions" tab in GitHub
+  workflow_dispatch:
   push:
-    branches: ["main", "master"]
-    tags:
-      - 'v*'
-
-permissions:
-  contents: write
-
-env:
-  SOURCE_REPO: jim60105/bgutil-ytdlp-pot-provider-rs
+    branches:
+      - main
+      - master
 
 jobs:
-  prepare:
-    name: Prepare source checkout
-    runs-on: ubuntu-latest
-    outputs:
-      source_ref: ${{ steps.detect_source_ref.outputs.source_ref }}
-    steps:
-      - name: Detect upstream tag or default branch
-        id: detect_source_ref
-        shell: bash
-        run: |
-          set -euo pipefail
-          export GIT_TERMINAL_PROMPT=0
-
-          TAG="${{ github.ref_name }}"
-          REPO_URL="https://github.com/${SOURCE_REPO}.git"
-
-          if git ls-remote --exit-code --tags "${REPO_URL}" "refs/tags/${TAG}" >/dev/null 2>&1; then
-            echo "source_ref=${TAG}" >> "${GITHUB_OUTPUT}"
-            echo "Using upstream tag: ${TAG}"
-          else
-            DEFAULT_BRANCH="$(git ls-remote --symref "${REPO_URL}" HEAD | awk '/^ref:/ {sub("refs/heads/", "", $2); print $2; exit}')"
-
-            if [ -z "${DEFAULT_BRANCH}" ]; then
-              DEFAULT_BRANCH="main"
-            fi
-
-            echo "source_ref=${DEFAULT_BRANCH}" >> "${GITHUB_OUTPUT}"
-            echo "Upstream tag ${TAG} not found. Using upstream branch: ${DEFAULT_BRANCH}"
-          fi
-
-  create-release:
-    name: Create Release
-    runs-on: ubuntu-latest
-    needs: prepare
-    outputs:
-      upload_url: ${{ steps.create_release.outputs.upload_url }}
-    steps:
-      - name: Checkout upstream source
-        uses: actions/checkout@v5
-        with:
-          repository: ${{ env.SOURCE_REPO }}
-          ref: ${{ needs.prepare.outputs.source_ref }}
-
-      - name: Extract changelog content
-        id: extract_changelog
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          VERSION="${{ github.ref_name }}"
-          VERSION_NUM="${VERSION#v}"
-
-          if [ -f CHANGELOG.md ]; then
-            awk "/^## \[$VERSION_NUM\]/{flag=1; next} /^## \[/{if(flag) exit} flag" CHANGELOG.md > release_notes.md
-          fi
-
-          if [ ! -s release_notes.md ]; then
-            echo "Release ${VERSION}" > release_notes.md
-          fi
-
-      - name: Create Release
-        id: create_release
-        uses: softprops/action-gh-release@v2
-        with:
-          tag_name: ${{ github.ref_name }}
-          name: Release ${{ github.ref_name }}
-          draft: false
-          prerelease: false
-          body_path: release_notes.md
-
-      - name: Package Plugin for Release
-        id: package_plugin
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          if [ ! -d plugin ]; then
-            echo "plugin/ directory was not found in the checked-out source repository."
-            exit 1
-          fi
-
-          cd plugin/
-
-          mkdir -p bundle/
-
-          if [ -f ../README.md ]; then
-            cp ../README.md .
-          fi
-
-          if [ ! -d yt_dlp_plugins ]; then
-            echo "yt_dlp_plugins/ directory was not found in plugin/."
-            exit 1
-          fi
-
-          cp -r yt_dlp_plugins bundle/
-
-          cd bundle/
-          find . -type f -name '*.py[co]' -delete -o -type d -name __pycache__ -delete
-
-          PROJECT_NAME=$(python3 -c "
-          import tomllib
-          from pathlib import Path
-          path = Path('../pyproject.toml')
-          if path.exists():
-              with path.open('rb') as f:
-                  data = tomllib.load(f)
-              print(data['project']['name'])
-          else:
-              print('bgutil-ytdlp-pot-provider')
-          ")
-
-          zip -9 --recurse-paths "${PROJECT_NAME}.zip" *
-
-          echo "plugin_zip_path=plugin/bundle/${PROJECT_NAME}.zip" >> "${GITHUB_OUTPUT}"
-          echo "plugin_zip_name=${PROJECT_NAME}.zip" >> "${GITHUB_OUTPUT}"
-
-          ls -la "${PROJECT_NAME}.zip"
-          echo "Created plugin package: ${PROJECT_NAME}.zip"
-
-      - name: Wait for Release Creation
-        shell: bash
-        run: sleep 5
-
-      - name: Upload Release Assets
-        uses: softprops/action-gh-release@v2
-        with:
-          files: ${{ steps.package_plugin.outputs.plugin_zip_path }}
-
   build:
     name: Build aarch64-unknown-linux-musl
     runs-on: ubuntu-latest
-    needs: [prepare, create-release]
-    permissions:
-      id-token: write
-      contents: write
-      attestations: write
-    strategy:
-      matrix:
-        include:
-          - os: ubuntu-latest
-            target: aarch64-unknown-linux-musl
-            platform: linux-aarch64-musl
-            extra_features: "--features vendored-openssl"
-
+    
     steps:
       - name: Checkout upstream source
-        uses: actions/checkout@v5
+        uses: actions/checkout@v4
         with:
-          repository: ${{ env.SOURCE_REPO }}
-          ref: ${{ needs.prepare.outputs.source_ref }}
+          # Explicitly checkout the target repository instead of the workflow repository
+          repository: jim60105/bgutil-ytdlp-pot-provider-rs
+          # Omitting 'ref' automatically checks out the default branch (main/master)
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
         with:
-          targets: ${{ matrix.target }}
+          targets: aarch64-unknown-linux-musl
 
       - name: Install cross tool
         uses: taiki-e/install-action@v2
         with:
           tool: cross
 
-      - name: Build
+      - name: Build binary and FFI library
         shell: bash
         run: |
-          set -euo pipefail
-          cross build --release --target "${{ matrix.target }}" --features ffi ${{ matrix.extra_features }}
+          cross build --release --target aarch64-unknown-linux-musl --features ffi --features vendored-openssl
 
-      - name: Package and Upload Assets
+      - name: Verify Build Artifacts
         shell: bash
         run: |
-          set -euo pipefail
-
-          BIN="bgutil-pot"
-          ASSET="bgutil-pot-${{ matrix.platform }}"
-
-          cp "target/${{ matrix.target }}/release/${BIN}" "${ASSET}"
-          chmod +x "${ASSET}"
-
-          LIB_NAME="libbgutil_ytdlp_pot_provider.so"
-          LIB_ASSET="libbgutil_ytdlp_pot_provider-${{ matrix.platform }}.so"
-
-          cp "target/${{ matrix.target }}/release/${LIB_NAME}" "${LIB_ASSET}"
-
-          ls -la
-
-      - name: Generate artifact attestation
-        uses: actions/attest-build-provenance@v2
-        with:
-          subject-path: |
-            bgutil-pot-${{ matrix.platform }}*
-            *bgutil_ytdlp_pot_provider-${{ matrix.platform }}*
-
-      - name: Upload Release Assets
-        uses: softprops/action-gh-release@v2
-        with:
-          files: |
-            bgutil-pot-${{ matrix.platform }}*
-            *bgutil_ytdlp_pot_provider-${{ matrix.platform }}*
+          echo "=== Checking compiled binary ==="
+          ls -lh target/aarch64-unknown-linux-musl/release/bgutil-pot
+          file target/aarch64-unknown-linux-musl/release/bgutil-pot
+          
+          echo ""
+          echo "=== Checking compiled FFI library ==="
+          ls -lh target/aarch64-unknown-linux-musl/release/libbgutil_ytdlp_pot_provider.so
+          file target/aarch64-unknown-linux-musl/release/libbgutil_ytdlp_pot_provider.so
