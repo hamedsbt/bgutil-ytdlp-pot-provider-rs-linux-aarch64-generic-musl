@@ -15,8 +15,8 @@ jobs:
     outputs:
       upload_url: ${{ steps.create_release.outputs.upload_url }}
     steps:
-    - uses: actions/checkout@v4
-    
+    - uses: actions/checkout@v5
+
     - name: Extract changelog content
       id: extract_changelog
       run: |
@@ -24,15 +24,15 @@ jobs:
         VERSION="${{ github.ref_name }}"
         # Remove 'v' prefix if present
         VERSION_NUM="${VERSION#v}"
-        
+
         # Find the section for this version and extract content until next version or end
         awk "/^## \[$VERSION_NUM\]/{flag=1; next} /^## \[/{if(flag) exit} flag" CHANGELOG.md > release_notes.md
-        
+
         # If no specific version found, use a default message
         if [ ! -s release_notes.md ]; then
           echo "Release $VERSION" > release_notes.md
         fi
-    
+
     - name: Create Release
       id: create_release
       uses: softprops/action-gh-release@v2
@@ -44,24 +44,24 @@ jobs:
         body_path: release_notes.md
 
     - name: Package Plugin for Release
-      id: package_plugin  # Added ID to reference outputs
+      id: package_plugin
       shell: bash
       run: |
         cd plugin/
-        
+
         # Create bundle directory
         mkdir -p bundle/
-        
+
         # Copy README.md to plugin directory
         cp ../README.md .
-        
+
         # Copy yt_dlp_plugins to bundle
         cp -r yt_dlp_plugins bundle/
-        
+
         # Enter bundle directory and clean Python cache files
         cd bundle/
         find . -type f -name '*.py[co]' -delete -o -type d -name __pycache__ -delete
-        
+
         # Get project name from pyproject.toml
         PROJECT_NAME=$(python3 -c "
         import tomllib
@@ -69,14 +69,14 @@ jobs:
             data = tomllib.load(f)
         print(data['project']['name'])
         ")
-        
+
         # Create ZIP file
         zip -9 --recurse-paths "${PROJECT_NAME}.zip" *
-        
-        # Output file path for subsequent steps using GITHUB_OUTPUT instead of GITHUB_ENV
-        echo "plugin_zip_path=plugin/bundle/${PROJECT_NAME}.zip" >> $GITHUB_OUTPUT
-        echo "plugin_zip_name=${PROJECT_NAME}.zip" >> $GITHUB_OUTPUT
-        
+
+        # Output file path for subsequent steps
+        echo "plugin_zip_path=plugin/bundle/${PROJECT_NAME}.zip" >> "$GITHUB_OUTPUT"
+        echo "plugin_zip_name=${PROJECT_NAME}.zip" >> "$GITHUB_OUTPUT"
+
         # Verify the ZIP file was created
         ls -la "${PROJECT_NAME}.zip"
         echo "Created plugin package: ${PROJECT_NAME}.zip"
@@ -87,7 +87,6 @@ jobs:
     - name: Upload Release Assets
       uses: softprops/action-gh-release@v2
       with:
-        # Reference the step output safely
         files: ${{ steps.package_plugin.outputs.plugin_zip_path }}
 
   build:
@@ -100,14 +99,14 @@ jobs:
     strategy:
       matrix:
         include:
-        # Linux aarch64 musl (static, for OpenWrt, Pi4, etc.)
+        # Linux aarch64 musl static build, suitable for OpenWrt / Raspberry Pi 4
         - os: ubuntu-latest
           target: aarch64-unknown-linux-musl
           platform: linux-aarch64-musl
           extra_features: "--features vendored-openssl"
 
     steps:
-    - uses: actions/checkout@v4
+    - uses: actions/checkout@v5
 
     - name: Install Rust
       uses: dtolnay/rust-toolchain@stable
@@ -127,14 +126,14 @@ jobs:
       run: |
         BIN="bgutil-pot"
         ASSET="bgutil-pot-${{ matrix.platform }}"
-        
+
         # Copy and prepare binary
         cp target/${{ matrix.target }}/release/$BIN $ASSET
         chmod +x $ASSET
-        
+
         LIB_NAME="libbgutil_ytdlp_pot_provider.so"
         LIB_ASSET="libbgutil_ytdlp_pot_provider-${{ matrix.platform }}.so"
-        
+
         # Copy FFI shared library
         cp target/${{ matrix.target }}/release/$LIB_NAME $LIB_ASSET
 
@@ -156,8 +155,10 @@ jobs:
     name: Publish to crates.io
     runs-on: ubuntu-latest
     steps:
-    - uses: actions/checkout@v4
+    - uses: actions/checkout@v5
+
     - name: Install Rust
       uses: dtolnay/rust-toolchain@stable
+
     - name: Publish to crates.io
       run: cargo publish --token ${{ secrets.CARGO_REGISTRY_TOKEN }}
