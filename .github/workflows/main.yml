@@ -2,97 +2,148 @@ name: Release
 
 on:
   push:
-    branches: ["main", "master"]
     tags:
       - 'v*'
 
 permissions:
   contents: write
 
+env:
+  SOURCE_REPO: jim60105/bgutil-ytdlp-pot-provider-rs
+
 jobs:
+  prepare:
+    name: Prepare source checkout
+    runs-on: ubuntu-latest
+    outputs:
+      source_ref: ${{ steps.detect_source_ref.outputs.source_ref }}
+    steps:
+      - name: Detect upstream tag or default branch
+        id: detect_source_ref
+        shell: bash
+        run: |
+          set -euo pipefail
+          export GIT_TERMINAL_PROMPT=0
+
+          TAG="${{ github.ref_name }}"
+          REPO_URL="https://github.com/${SOURCE_REPO}.git"
+
+          if git ls-remote --exit-code --tags "${REPO_URL}" "refs/tags/${TAG}" >/dev/null 2>&1; then
+            echo "source_ref=${TAG}" >> "${GITHUB_OUTPUT}"
+            echo "Using upstream tag: ${TAG}"
+          else
+            DEFAULT_BRANCH="$(git ls-remote --symref "${REPO_URL}" HEAD | awk '/^ref:/ {sub("refs/heads/", "", $2); print $2; exit}')"
+
+            if [ -z "${DEFAULT_BRANCH}" ]; then
+              DEFAULT_BRANCH="main"
+            fi
+
+            echo "source_ref=${DEFAULT_BRANCH}" >> "${GITHUB_OUTPUT}"
+            echo "Upstream tag ${TAG} not found. Using upstream branch: ${DEFAULT_BRANCH}"
+          fi
+
   create-release:
     name: Create Release
     runs-on: ubuntu-latest
+    needs: prepare
     outputs:
       upload_url: ${{ steps.create_release.outputs.upload_url }}
     steps:
-    - uses: actions/checkout@v5
+      - name: Checkout upstream source
+        uses: actions/checkout@v5
+        with:
+          repository: ${{ env.SOURCE_REPO }}
+          ref: ${{ needs.prepare.outputs.source_ref }}
 
-    - name: Extract changelog content
-      id: extract_changelog
-      run: |
-        # Extract the latest version's changelog content
-        VERSION="${{ github.ref_name }}"
-        # Remove 'v' prefix if present
-        VERSION_NUM="${VERSION#v}"
+      - name: Extract changelog content
+        id: extract_changelog
+        shell: bash
+        run: |
+          set -euo pipefail
 
-        # Find the section for this version and extract content until next version or end
-        awk "/^## \[$VERSION_NUM\]/{flag=1; next} /^## \[/{if(flag) exit} flag" CHANGELOG.md > release_notes.md
+          VERSION="${{ github.ref_name }}"
+          VERSION_NUM="${VERSION#v}"
 
-        # If no specific version found, use a default message
-        if [ ! -s release_notes.md ]; then
-          echo "Release $VERSION" > release_notes.md
-        fi
+          if [ -f CHANGELOG.md ]; then
+            awk "/^## \[$VERSION_NUM\]/{flag=1; next} /^## \[/{if(flag) exit} flag" CHANGELOG.md > release_notes.md
+          fi
 
-    - name: Create Release
-      id: create_release
-      uses: softprops/action-gh-release@v2
-      with:
-        tag_name: ${{ github.ref_name }}
-        name: Release ${{ github.ref_name }}
-        draft: false
-        prerelease: false
-        body_path: release_notes.md
+          if [ ! -s release_notes.md ]; then
+            echo "Release ${VERSION}" > release_notes.md
+          fi
 
-    - name: Package Plugin for Release
-      id: package_plugin
-      shell: bash
-      run: |
-        cd plugin/
+      - name: Create Release
+        id: create_release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.ref_name }}
+          name: Release ${{ github.ref_name }}
+          draft: false
+          prerelease: false
+          body_path: release_notes.md
 
-        # Create bundle directory
-        mkdir -p bundle/
+      - name: Package Plugin for Release
+        id: package_plugin
+        shell: bash
+        run: |
+          set -euo pipefail
 
-        # Copy README.md to plugin directory
-        cp ../README.md .
+          if [ ! -d plugin ]; then
+            echo "plugin/ directory was not found in the checked-out source repository."
+            exit 1
+          fi
 
-        # Copy yt_dlp_plugins to bundle
-        cp -r yt_dlp_plugins bundle/
+          cd plugin/
 
-        # Enter bundle directory and clean Python cache files
-        cd bundle/
-        find . -type f -name '*.py[co]' -delete -o -type d -name __pycache__ -delete
+          mkdir -p bundle/
 
-        # Get project name from pyproject.toml
-        PROJECT_NAME=$(python3 -c "
-        import tomllib
-        with open('../pyproject.toml', 'rb') as f:
-            data = tomllib.load(f)
-        print(data['project']['name'])
-        ")
+          if [ -f ../README.md ]; then
+            cp ../README.md .
+          fi
 
-        # Create ZIP file
-        zip -9 --recurse-paths "${PROJECT_NAME}.zip" *
+          if [ ! -d yt_dlp_plugins ]; then
+            echo "yt_dlp_plugins/ directory was not found in plugin/."
+            exit 1
+          fi
 
-        # Output file path for subsequent steps
-        echo "plugin_zip_path=plugin/bundle/${PROJECT_NAME}.zip" >> "$GITHUB_OUTPUT"
-        echo "plugin_zip_name=${PROJECT_NAME}.zip" >> "$GITHUB_OUTPUT"
+          cp -r yt_dlp_plugins bundle/
 
-        # Verify the ZIP file was created
-        ls -la "${PROJECT_NAME}.zip"
-        echo "Created plugin package: ${PROJECT_NAME}.zip"
+          cd bundle/
+          find . -type f -name '*.py[co]' -delete -o -type d -name __pycache__ -delete
 
-    - name: Wait for Release Creation
-      run: sleep 5
+          PROJECT_NAME=$(python3 -c "
+          import tomllib
+          from pathlib import Path
+          path = Path('../pyproject.toml')
+          if path.exists():
+              with path.open('rb') as f:
+                  data = tomllib.load(f)
+              print(data['project']['name'])
+          else:
+              print('bgutil-ytdlp-pot-provider')
+          ")
 
-    - name: Upload Release Assets
-      uses: softprops/action-gh-release@v2
-      with:
-        files: ${{ steps.package_plugin.outputs.plugin_zip_path }}
+          zip -9 --recurse-paths "${PROJECT_NAME}.zip" *
+
+          echo "plugin_zip_path=plugin/bundle/${PROJECT_NAME}.zip" >> "${GITHUB_OUTPUT}"
+          echo "plugin_zip_name=${PROJECT_NAME}.zip" >> "${GITHUB_OUTPUT}"
+
+          ls -la "${PROJECT_NAME}.zip"
+          echo "Created plugin package: ${PROJECT_NAME}.zip"
+
+      - name: Wait for Release Creation
+        shell: bash
+        run: sleep 5
+
+      - name: Upload Release Assets
+        uses: softprops/action-gh-release@v2
+        with:
+          files: ${{ steps.package_plugin.outputs.plugin_zip_path }}
 
   build:
-    name: Build and Upload
-    runs-on: ${{ matrix.os }}
+    name: Build aarch64-unknown-linux-musl
+    runs-on: ubuntu-latest
+    needs: [prepare, create-release]
     permissions:
       id-token: write
       contents: write
@@ -100,66 +151,62 @@ jobs:
     strategy:
       matrix:
         include:
-        # Linux aarch64 musl static build, suitable for OpenWrt / Raspberry Pi 4
-        - os: ubuntu-latest
-          target: aarch64-unknown-linux-musl
-          platform: linux-aarch64-musl
-          extra_features: "--features vendored-openssl"
+          - os: ubuntu-latest
+            target: aarch64-unknown-linux-musl
+            platform: linux-aarch64-musl
+            extra_features: "--features vendored-openssl"
 
     steps:
-    - uses: actions/checkout@v5
+      - name: Checkout upstream source
+        uses: actions/checkout@v5
+        with:
+          repository: ${{ env.SOURCE_REPO }}
+          ref: ${{ needs.prepare.outputs.source_ref }}
 
-    - name: Install Rust
-      uses: dtolnay/rust-toolchain@stable
-      with:
-        targets: ${{ matrix.target }}
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
 
-    - name: Install cross tool
-      uses: taiki-e/install-action@v2
-      with:
-        tool: cross
+      - name: Install cross tool
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cross
 
-    - name: Build
-      run: cross build --release --target ${{ matrix.target }} --features ffi ${{ matrix.extra_features }}
+      - name: Build
+        shell: bash
+        run: |
+          set -euo pipefail
+          cross build --release --target "${{ matrix.target }}" --features ffi ${{ matrix.extra_features }}
 
-    - name: Package and Upload Assets
-      shell: bash
-      run: |
-        BIN="bgutil-pot"
-        ASSET="bgutil-pot-${{ matrix.platform }}"
+      - name: Package and Upload Assets
+        shell: bash
+        run: |
+          set -euo pipefail
 
-        # Copy and prepare binary
-        cp target/${{ matrix.target }}/release/$BIN $ASSET
-        chmod +x $ASSET
+          BIN="bgutil-pot"
+          ASSET="bgutil-pot-${{ matrix.platform }}"
 
-        LIB_NAME="libbgutil_ytdlp_pot_provider.so"
-        LIB_ASSET="libbgutil_ytdlp_pot_provider-${{ matrix.platform }}.so"
+          cp "target/${{ matrix.target }}/release/${BIN}" "${ASSET}"
+          chmod +x "${ASSET}"
 
-        # Copy FFI shared library
-        cp target/${{ matrix.target }}/release/$LIB_NAME $LIB_ASSET
+          LIB_NAME="libbgutil_ytdlp_pot_provider.so"
+          LIB_ASSET="libbgutil_ytdlp_pot_provider-${{ matrix.platform }}.so"
 
-    - name: Generate artifact attestation
-      uses: actions/attest-build-provenance@v2
-      with:
-        subject-path: |
-          bgutil-pot-${{ matrix.platform }}*
-          *bgutil_ytdlp_pot_provider-${{ matrix.platform }}*
+          cp "target/${{ matrix.target }}/release/${LIB_NAME}" "${LIB_ASSET}"
 
-    - name: Upload Release Assets
-      uses: softprops/action-gh-release@v2
-      with:
-        files: |
-          bgutil-pot-${{ matrix.platform }}*
-          *bgutil_ytdlp_pot_provider-${{ matrix.platform }}*
+          ls -la
 
-  publish-crates:
-    name: Publish to crates.io
-    runs-on: ubuntu-latest
-    steps:
-    - uses: actions/checkout@v5
+      - name: Generate artifact attestation
+        uses: actions/attest-build-provenance@v2
+        with:
+          subject-path: |
+            bgutil-pot-${{ matrix.platform }}*
+            *bgutil_ytdlp_pot_provider-${{ matrix.platform }}*
 
-    - name: Install Rust
-      uses: dtolnay/rust-toolchain@stable
-
-    - name: Publish to crates.io
-      run: cargo publish --token ${{ secrets.CARGO_REGISTRY_TOKEN }}
+      - name: Upload Release Assets
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            bgutil-pot-${{ matrix.platform }}*
+            *bgutil_ytdlp_pot_provider-${{ matrix.platform }}*
